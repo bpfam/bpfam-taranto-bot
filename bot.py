@@ -1,9 +1,10 @@
 # ============================================================
 # bot.py — BPFAM TARANTO (ptb v21+)
 # 2 bottoni interni (Menù / Contatti-Info) + "⬅️ Torna indietro"
+# Testi da ENV (Render): WELCOME_TEXT, MENU_PAGE_TEXT, INFO_PAGE_TEXT
+# Anti-condivisione: protect_content=True su tutti i messaggi inviati
 # Utenti su SQLite + Admin blindato + Backup (auto+manuale) + Restore
-# Anti-conflict + Webhook guard (polling sicuro)
-# NO messaggi doppi: navigazione tutta via edit (stesso messaggio)
+# Anti-conflict + Webhook guard (polling sicuro) + no messaggi doppi
 # ============================================================
 
 import os
@@ -25,7 +26,7 @@ from telegram.ext import (
     filters,
 )
 
-VERSION = "2btn-secure-restore-1.4-back-safe"
+VERSION = "2btn-secure-restore-1.5-env-protect"
 
 # ===== LOGGING =====
 logging.basicConfig(
@@ -45,16 +46,20 @@ PHOTO_URL   = os.environ.get(
     "PHOTO_URL",
     "https://i.postimg.cc/bv4ssL2t/2A3BDCFD-2D21-41BC-8BFA-9C5D238E5C3B.jpg",
 )
-WELCOME_TEXT = "🥇Benvenuti nel bot ufficiale di BPFAM-TARANTO🥇\nScegli un’opzione qui sotto."
 
-# Testi interni (personalizzabili)
-MENU_PAGE_TEXT = (
+# === Testi gestibili da Render ===
+WELCOME_TEXT = os.environ.get(
+    "WELCOME_TEXT",
+    "🥇Benvenuti nel bot ufficiale di BPFAM-TARANTO🥇\nScegli un’opzione qui sotto."
+)
+MENU_PAGE_TEXT = os.environ.get(
+    "MENU_PAGE_TEXT",
     "📖 *MENÙ — BPFAM TARANTO*\n"
     "Benvenuto nel menù interno del bot.\n\n"
     "• Voce A\n• Voce B\n• Voce C\n"
 )
-
-INFO_PAGE_TEXT = (
+INFO_PAGE_TEXT = os.environ.get(
+    "INFO_PAGE_TEXT",
     "📲 *CONTATTI & INFO — BPFAM TARANTO*\n"
     "Canali verificati e contatti ufficiali.\n\n"
     "Instagram: @bpfamofficial\n"
@@ -134,12 +139,6 @@ def kb_back() -> InlineKeyboardMarkup:
 
 # --- EDIT HELPER (no messaggi doppi) ---
 async def edit_view(q_msg, text: str, markup: InlineKeyboardMarkup, parse_mode: str = "Markdown"):
-    """
-    Edita *lo stesso messaggio*:
-    - se è una foto con didascalia -> edit_caption
-    - altrimenti -> edit_text
-    Evita messaggi doppi e aperture di nuove chat.
-    """
     try:
         if getattr(q_msg, "photo", None):
             await q_msg.edit_caption(caption=text, reply_markup=markup, parse_mode=parse_mode)
@@ -150,15 +149,24 @@ async def edit_view(q_msg, text: str, markup: InlineKeyboardMarkup, parse_mode: 
 
 # --- VISTE (schermate) ---
 async def show_home_from_start(chat, context: ContextTypes.DEFAULT_TYPE):
-    """Home iniziale usata da /start: invia FOTO + didascalia."""
+    """Home iniziale usata da /start: invia FOTO + didascalia (protetta)."""
     try:
-        await chat.send_photo(photo=PHOTO_URL, caption=WELCOME_TEXT, reply_markup=kb_home())
+        await chat.send_photo(
+            photo=PHOTO_URL,
+            caption=WELCOME_TEXT,
+            reply_markup=kb_home(),
+            protect_content=True  # 🚫 blocca inoltro/salvataggio/copia
+        )
     except Exception as e:
         logger.warning("Foto non inviata (%s), invio solo testo.", e)
-        await chat.send_message(WELCOME_TEXT, reply_markup=kb_home())
+        await chat.send_message(
+            WELCOME_TEXT,
+            reply_markup=kb_home(),
+            protect_content=True  # anche il testo è protetto
+        )
 
 async def show_home_from_callback(q):
-    """Home via callback (stesso messaggio)."""
+    """Home via callback (stesso messaggio, già protetto)."""
     await edit_view(q.message, WELCOME_TEXT, kb_home())
 
 async def show_menu(q):
@@ -193,10 +201,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer("Comando non riconosciuto.", show_alert=True)
         return
 
-    # chiude la rotellina di caricamento
-    await q.answer()
+    await q.answer()  # chiude la rotellina
 
 # ===== HANDLERS — ADMIN =====
+def _send_protected_text(chat, text):
+    # Helper per inviare testo sempre protetto (meno ripetizioni)
+    return chat.send_message(text, protect_content=True)
+
 @admin_only
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_FILE); cur = conn.cursor()
@@ -209,7 +220,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🗂️ Backup dir: {BACKUP_DIR}\n"
         f"⏰ Backup auto (UTC): {BACKUP_TIME}"
     )
-    await update.effective_chat.send_message(msg)
+    await _send_protected_text(update.effective_chat, msg)
 
 @admin_only
 async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -217,7 +228,7 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur.execute("SELECT user_id, username, first_name, last_name, last_seen FROM users ORDER BY last_seen DESC LIMIT 50")
     rows = cur.fetchall(); conn.close()
     if not rows:
-        await update.effective_chat.send_message("Nessun utente registrato.")
+        await _send_protected_text(update.effective_chat, "Nessun utente registrato.")
         return
     lines = []
     for uid, un, fn, ln, ls in rows:
@@ -225,7 +236,7 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = " ".join([x for x in [fn, ln] if x]) or "-"
         lines.append(f"• {uid} {tag} — {name} — {ls[:19].replace('T',' ')}Z")
     text = "Ultimi 50 utenti:\n" + "\n".join(lines)
-    await update.effective_chat.send_message(text)
+    await _send_protected_text(update.effective_chat, text)
 
 @admin_only
 async def export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -240,7 +251,10 @@ async def export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buf.write((",".join(safe) + "\n").encode())
     buf.seek(0)
     filename = f"users_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
-    await update.effective_chat.send_document(document=InputFile(buf, filename=filename))
+    await update.effective_chat.send_document(
+        document=InputFile(buf, filename=filename),
+        protect_content=True  # 🚫 impedisce inoltro/salvataggio del CSV
+    )
 
 @admin_only
 async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -250,12 +264,15 @@ async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         shutil.copyfile(DB_FILE, dest)
     except Exception as e:
-        await update.effective_chat.send_message(f"❌ Errore backup: {e}")
+        await _send_protected_text(update.effective_chat, f"❌ Errore backup: {e}")
         return
     try:
-        await update.effective_chat.send_document(document=InputFile(str(dest)))
+        await update.effective_chat.send_document(
+            document=InputFile(str(dest)),
+            protect_content=True  # 🚫 impedisce inoltro/salvataggio del DB
+        )
     except Exception as e:
-        await update.effective_chat.send_message(f"Backup salvato su disco, ma invio fallito: {e}")
+        await _send_protected_text(update.effective_chat, f"Backup salvato su disco, ma invio fallito: {e}")
 
 @admin_only
 async def restore_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -269,12 +286,13 @@ async def restore_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_chat.send_message(
             "Per ripristinare: invia un file .db al bot e poi fai *rispondi* a quel file con /restore_db",
             parse_mode="Markdown",
+            protect_content=True
         )
         return
 
     doc = msg.reply_to_message.document
     if not doc.file_name.endswith(".db"):
-        await update.effective_chat.send_message("Il file deve avere estensione .db")
+        await _send_protected_text(update.effective_chat, "Il file deve avere estensione .db")
         return
 
     try:
@@ -283,7 +301,7 @@ async def restore_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
         Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
         await file.download_to_drive(custom_path=str(tmp_path))
     except Exception as e:
-        await update.effective_chat.send_message(f"❌ Errore download file: {e}")
+        await _send_protected_text(update.effective_chat, f"❌ Errore download file: {e}")
         return
 
     try:
@@ -291,15 +309,15 @@ async def restore_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if Path(DB_FILE).exists():
             shutil.copyfile(DB_FILE, safety_copy)
     except Exception as e:
-        await update.effective_chat.send_message(f"❌ Errore copia di sicurezza: {e}")
+        await _send_protected_text(update.effective_chat, f"❌ Errore copia di sicurezza: {e}")
         return
 
     try:
         Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(tmp_path, DB_FILE)
-        await update.effective_chat.send_message("✅ Database ripristinato con successo. Usa /status per verificare.")
+        await _send_protected_text(update.effective_chat, "✅ Database ripristinato con successo. Usa /status per verificare.")
     except Exception as e:
-        await update.effective_chat.send_message(f"❌ Errore ripristino DB: {e}")
+        await _send_protected_text(update.effective_chat, f"❌ Errore ripristino DB: {e}")
     finally:
         try:
             if tmp_path.exists():
@@ -316,7 +334,11 @@ async def daily_backup_job(context: ContextTypes.DEFAULT_TYPE):
         logger.info("Backup auto eseguito: %s", dest)
         if ADMIN_ID:
             try:
-                await context.bot.send_document(chat_id=ADMIN_ID, document=InputFile(str(dest)))
+                await context.bot.send_document(
+                    chat_id=ADMIN_ID,
+                    document=InputFile(str(dest)),
+                    protect_content=True  # anche il backup automatico è protetto
+                )
             except Exception as e:
                 logger.warning("Invio backup auto fallito: %s", e)
     except Exception as e:
