@@ -1,8 +1,9 @@
 # ============================================================
 # bot.py — BPFAM TARANTO (ptb v21+)
-# 2 bottoni interni (Menù / Contatti-Info)
+# 2 bottoni interni (Menù / Contatti-Info) + "⬅️ Torna indietro"
 # Utenti su SQLite + Admin blindato + Backup (auto+manuale) + Restore
 # Anti-conflict + Webhook guard (polling sicuro)
+# NO messaggi doppi: navigazione tutta via edit (stesso messaggio)
 # ============================================================
 
 import os
@@ -24,7 +25,7 @@ from telegram.ext import (
     filters,
 )
 
-VERSION = "2btn-secure-restore-1.2"
+VERSION = "2btn-secure-restore-1.4-back-safe"
 
 # ===== LOGGING =====
 logging.basicConfig(
@@ -44,9 +45,9 @@ PHOTO_URL   = os.environ.get(
     "PHOTO_URL",
     "https://i.postimg.cc/bv4ssL2t/2A3BDCFD-2D21-41BC-8BFA-9C5D238E5C3B.jpg",
 )
-WELCOME_TEXT = "🥇Benvenuti nel bot ufficiale di BPFAM-TARANTO🥇"
+WELCOME_TEXT = "🥇Benvenuti nel bot ufficiale di BPFAM-TARANTO🥇\nScegli un’opzione qui sotto."
 
-# Testi interni (puoi personalizzarli quando vuoi)
+# Testi interni (personalizzabili)
 MENU_PAGE_TEXT = (
     "📖 *MENÙ — BPFAM TARANTO*\n"
     "Benvenuto nel menù interno del bot.\n\n"
@@ -119,11 +120,52 @@ def parse_backup_time(hhmm: str) -> dtime:
     except Exception:
         return dtime(hour=3, minute=0, tzinfo=timezone.utc)
 
-def main_keyboard() -> InlineKeyboardMarkup:
+# --- KEYBOARDS ---
+def kb_home() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("📖 MENÙ", callback_data="OPEN_MENU"),
         InlineKeyboardButton("📲 CONTATTI-INFO", callback_data="OPEN_INFO"),
     ]])
+
+def kb_back() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Torna indietro", callback_data="BACK_HOME")]
+    ])
+
+# --- EDIT HELPER (no messaggi doppi) ---
+async def edit_view(q_msg, text: str, markup: InlineKeyboardMarkup, parse_mode: str = "Markdown"):
+    """
+    Edita *lo stesso messaggio*:
+    - se è una foto con didascalia -> edit_caption
+    - altrimenti -> edit_text
+    Evita messaggi doppi e aperture di nuove chat.
+    """
+    try:
+        if getattr(q_msg, "photo", None):
+            await q_msg.edit_caption(caption=text, reply_markup=markup, parse_mode=parse_mode)
+        else:
+            await q_msg.edit_text(text, reply_markup=markup, parse_mode=parse_mode, disable_web_page_preview=True)
+    except Exception as e:
+        logger.warning("edit_view fallita: %s", e)
+
+# --- VISTE (schermate) ---
+async def show_home_from_start(chat, context: ContextTypes.DEFAULT_TYPE):
+    """Home iniziale usata da /start: invia FOTO + didascalia."""
+    try:
+        await chat.send_photo(photo=PHOTO_URL, caption=WELCOME_TEXT, reply_markup=kb_home())
+    except Exception as e:
+        logger.warning("Foto non inviata (%s), invio solo testo.", e)
+        await chat.send_message(WELCOME_TEXT, reply_markup=kb_home())
+
+async def show_home_from_callback(q):
+    """Home via callback (stesso messaggio)."""
+    await edit_view(q.message, WELCOME_TEXT, kb_home())
+
+async def show_menu(q):
+    await edit_view(q.message, MENU_PAGE_TEXT, kb_back())
+
+async def show_info(q):
+    await edit_view(q.message, INFO_PAGE_TEXT, kb_back())
 
 # ===== HANDLERS — USER =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -133,23 +175,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         upsert_user(user)
     if not chat:
         return
-
-    try:
-        await chat.send_photo(photo=PHOTO_URL, caption=WELCOME_TEXT, reply_markup=main_keyboard())
-    except Exception as e:
-        logger.warning("Foto non inviata (%s), invio solo testo.", e)
-        await chat.send_message(WELCOME_TEXT, reply_markup=main_keyboard())
+    await show_home_from_start(chat, context)
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not q:
         return
-    await q.answer()
-    data = q.data or ""
+    data = (q.data or "").strip()
+
     if data == "OPEN_MENU":
-        await q.message.reply_text(MENU_PAGE_TEXT, reply_markup=main_keyboard(), parse_mode="Markdown")
+        await show_menu(q)
     elif data == "OPEN_INFO":
-        await q.message.reply_text(INFO_PAGE_TEXT, reply_markup=main_keyboard(), parse_mode="Markdown")
+        await show_info(q)
+    elif data == "BACK_HOME":
+        await show_home_from_callback(q)
+    else:
+        await q.answer("Comando non riconosciuto.", show_alert=True)
+        return
+
+    # chiude la rotellina di caricamento
+    await q.answer()
 
 # ===== HANDLERS — ADMIN =====
 @admin_only
@@ -216,7 +261,6 @@ async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def restore_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Ripristina il DB da un file .db che hai INVIATO al bot.
-    Usa così:
     1) Invia il file .db al bot (come documento)
     2) Fai REPLY a quel messaggio con il comando /restore_db
     """
@@ -297,7 +341,7 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(_post_init).build()
 
-    # --- FIX: assicurati che la JobQueue esista (evita AttributeError: NoneType run_daily)
+    # --- FIX: assicura la JobQueue (evita AttributeError: NoneType run_daily)
     if not getattr(app, "job_queue", None):
         from telegram.ext import JobQueue
         jq = JobQueue()
