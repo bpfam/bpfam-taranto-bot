@@ -24,7 +24,7 @@ from telegram.ext import (
     filters,
 )
 
-VERSION = "2btn-secure-restore-1.1"
+VERSION = "2btn-secure-restore-1.2"
 
 # ===== LOGGING =====
 logging.basicConfig(
@@ -134,7 +134,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not chat:
         return
 
-    # Immagine + didascalia + 2 bottoni
     try:
         await chat.send_photo(photo=PHOTO_URL, caption=WELCOME_TEXT, reply_markup=main_keyboard())
     except Exception as e:
@@ -208,7 +207,6 @@ async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.effective_chat.send_message(f"❌ Errore backup: {e}")
         return
-    # invia file
     try:
         await update.effective_chat.send_document(document=InputFile(str(dest)))
     except Exception as e:
@@ -235,7 +233,6 @@ async def restore_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_chat.send_message("Il file deve avere estensione .db")
         return
 
-    # scarica file in memoria e scrivi su un path temporaneo
     try:
         file = await doc.get_file()
         tmp_path = Path(BACKUP_DIR) / ("restore_tmp_" + doc.file_unique_id + ".db")
@@ -245,7 +242,6 @@ async def restore_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_chat.send_message(f"❌ Errore download file: {e}")
         return
 
-    # backup di sicurezza dell'attuale DB
     try:
         safety_copy = Path(BACKUP_DIR) / f"pre_restore_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.bak"
         if Path(DB_FILE).exists():
@@ -254,7 +250,6 @@ async def restore_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_chat.send_message(f"❌ Errore copia di sicurezza: {e}")
         return
 
-    # sostituzione atomica
     try:
         Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(tmp_path, DB_FILE)
@@ -262,7 +257,6 @@ async def restore_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.effective_chat.send_message(f"❌ Errore ripristino DB: {e}")
     finally:
-        # pulizia temporanei
         try:
             if tmp_path.exists():
                 tmp_path.unlink()
@@ -276,7 +270,6 @@ async def daily_backup_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         shutil.copyfile(DB_FILE, dest)
         logger.info("Backup auto eseguito: %s", dest)
-        # invia all'admin il file backup (opzionale)
         if ADMIN_ID:
             try:
                 await context.bot.send_document(chat_id=ADMIN_ID, document=InputFile(str(dest)))
@@ -304,6 +297,13 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(_post_init).build()
 
+    # --- FIX: assicurati che la JobQueue esista (evita AttributeError: NoneType run_daily)
+    if not getattr(app, "job_queue", None):
+        from telegram.ext import JobQueue
+        jq = JobQueue()
+        jq.set_application(app)
+        app.job_queue = jq
+
     # Comandi utente
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(on_button))
@@ -315,7 +315,7 @@ def main():
     app.add_handler(CommandHandler("backup_db", backup_db))
     app.add_handler(CommandHandler("restore_db", restore_db))
 
-    # (opzionale) intercetta documenti per aiutare l'admin — non fa nulla senza /restore_db
+    # (opzionale) intercetta documenti (serve per /restore_db via reply)
     app.add_handler(MessageHandler(filters.Document.ALL, lambda *_: None))
 
     # job di backup giornaliero (UTC)
